@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(userPath(request.auth.uid));
+    }
+
+    function myProfile() {
+      return get(userPath(request.auth.uid)).data;
+    }
+
+    function activeCompany(companyId) {
+      return exists(/databases/$(database)/documents/companies/$(companyId))
+        && get(/databases/$(database)/documents/companies/$(companyId)).data.active == true;
+    }
+
+    function managerOf(companyId) {
+      return hasProfile()
+        && myProfile().role == 'manager'
+        && myProfile().companyId == companyId;
+    }
+
+    match /companies/{companyId} {
+      allow read: if hasProfile() && myProfile().companyId == companyId;
+      // Create the first company document manually in Firebase Console as described in docs.
+      allow create: if false;
+      allow update: if managerOf(companyId)
+        && request.resource.data.managerUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']);
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      // New accounts can only self-register as employees in an active company.
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.uid == userId
+        && request.resource.data.role == 'employee'
+        && request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.companyId is string
+        && activeCompany(request.resource.data.companyId)
+        && request.resource.data.shiftStart == '09:00'
+        && request.resource.data.shiftEnd == '17:00'
+        && request.resource.data.keys().hasOnly([
+          'uid', 'name', 'email', 'role', 'companyId', 'shiftStart', 'shiftEnd', 'createdAt'
+        ]);
+
+      allow read: if signedIn()
+        && (request.auth.uid == userId || managerOf(resource.data.companyId));
+
+      allow update: if signedIn() && (
+        (
+          request.auth.uid == userId
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.companyId == resource.data.companyId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'email', 'updatedAt'])
+        ) || (
+          managerOf(resource.data.companyId)
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.companyId == resource.data.companyId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['shiftStart', 'shiftEnd', 'updatedAt'])
+          && request.resource.data.shiftStart.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+          && request.resource.data.shiftEnd.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+          && request.resource.data.shiftEnd > request.resource.data.shiftStart
+        )
+      );
+      allow delete: if false;
+    }
+
+    match /attendance/{recordId} {
+      allow read: if signedIn()
+        && (resource.data.uid == request.auth.uid || managerOf(resource.data.companyId));
+
+      allow create: if signedIn()
+        && hasProfile()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.companyId == myProfile().companyId
+        && request.resource.data.employeeName == myProfile().name
+        && request.resource.data.dateKey is string
+        && request.resource.data.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.clockIn == request.time
+        && request.resource.data.clockOut == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.keys().hasOnly([
+          'uid', 'employeeName', 'companyId', 'dateKey', 'clockIn', 'clockOut',
+          'shiftStart', 'shiftEnd', 'createdAt', 'updatedAt'
+        ]);
+
+      // Employees can close only their own still-open record. Identity and shift fields cannot be changed.
+      allow update: if signedIn()
+        && resource.data.uid == request.auth.uid
+        && resource.data.clockOut == null
+        && request.resource.data.clockOut == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clockOut', 'updatedAt']);
+
+      allow delete: if false;
+    }
+  }
+}

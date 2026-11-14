@@ -1,0 +1,784 @@
+================================================================================
+PROJECT NOTES - EMPLOYEE TIME CLOCK APP
+================================================================================
+
+A simple, beginner-friendly Android app that lets employees clock in and out,
+track their work hours, and lets managers view attendance reports and set
+employee shifts.
+
+Built with: Kotlin + Android (XML layouts, Activities), no Jetpack Compose,
+no Firebase - data is stored in memory (DataManager singleton).
+
+================================================================================
+1. APP STRUCTURE (FILE TREE)
+================================================================================
+
+Employee_Time_Clock_Project/
+├── build.gradle.kts                  # Project-level Gradle config (plugins)
+├── settings.gradle.kts               # Settings, includes :app module
+├── app/
+│   ├── build.gradle.kts              # App-level Gradle config (SDK, deps)
+│   ├── google-services.json          # (unused - no Firebase)
+│   └── src/
+│       └── main/
+│           ├── AndroidManifest.xml   # App manifest, declares all Activities
+│           ├── java/
+│           │   └── com/
+│           │       └── example/
+│           │           └── employeetimeclock/
+│           │               ├── Employee.kt              # Data model: employee
+│           │               ├── AttendanceRecord.kt      # Data model: clock record
+│           │               ├── Shift.kt                 # Data model: work shift
+│           │               ├── DataManager.kt           # Singleton data store
+│           │               ├── SplashActivity.kt        # Splash screen
+│           │               ├── LoginActivity.kt         # Login screen
+│           │               ├── RegisterActivity.kt      # Register screen
+│           │               ├── ForgotPasswordActivity.kt # Forgot password screen
+│           │               ├── MainActivity.kt          # Employee dashboard
+│           │               └── ManagerActivity.kt       # Manager dashboard
+│           └── res/
+│               ├── layout/
+│               │   ├── activity_splash.xml      # Splash screen UI
+│               │   ├── activity_login.xml       # Login screen UI
+│               │   ├── activity_register.xml    # Register screen UI
+│               │   ├── activity_forgot_password.xml  # Forgot password UI
+│               │   ├── activity_main.xml        # Employee dashboard UI
+│               │   ├── activity_manager.xml     # Manager dashboard UI
+│               │   └── dialog_shift.xml         # Shift-setting popup UI
+│               ├── drawable/           # (unused)
+│               ├── menu/               # menu_main.xml (unused)
+│               └── values/
+│                   ├── strings.xml   # App name
+│                   ├── colors.xml    # App colors
+│                   └── styles.xml    # App theme
+
+================================================================================
+2. OVERVIEW - WHAT EACH PAGE/FILE DOES
+================================================================================
+
+SPLASH SCREEN (SplashActivity.kt + activity_splash.xml)
+- Shows "Employee Time Clock" title on a blue background for 1.5 seconds.
+- Then automatically navigates to LoginActivity.
+
+LOGIN SCREEN (LoginActivity.kt + activity_login.xml)
+- User enters email and password.
+- On login, app checks if email matches a demo employee.
+- Routes to MainActivity (employee) or ManagerActivity (manager) based on role.
+- Links to RegisterActivity and ForgotPasswordActivity.
+
+REGISTER SCREEN (RegisterActivity.kt + activity_register.xml)
+- User enters name, email, password, confirm password.
+- Validates fields and password match.
+- Creates a new Employee and saves it in DataManager.
+- Returns to Login screen after success.
+
+FORGOT PASSWORD SCREEN (ForgotPasswordActivity.kt + activity_forgot_password.xml)
+- User enters email to reset password.
+- Shows a toast message (placeholder - no real email sending).
+- Finishes and returns to Login.
+
+EMPLOYEE DASHBOARD (MainActivity.kt + activity_main.xml)
+- Shows welcome message with employee name.
+- CLOCK IN button - records clock-in time.
+- CLOCK OUT button - records clock-out time and calculates hours worked.
+- Shows "Hours worked today" total.
+
+MANAGER DASHBOARD (ManagerActivity.kt + activity_manager.xml)
+- Shows Present / Absent employee counts for today.
+- Period filter: Today or This Month.
+- Employee list - tap any employee to open shift-setting dialog.
+- Attendance reports list - shows all clock records with hours.
+- Refresh button to reload data.
+
+SHIFT DIALOG (dialog_shift.xml)
+- Popup shown when manager taps an employee.
+- Lets manager set Shift Start and Shift End times for that employee.
+
+DATA MODELS:
+- Employee.kt - id, name, email, role, shiftStart, shiftEnd
+- AttendanceRecord.kt - id, employeeId, employeeName, date, clockIn, clockOut, hoursWorked
+- Shift.kt - employeeId, startTime, endTime
+
+DATA MANAGER:
+- DataManager.kt - Singleton that holds all employees, attendance records, and shifts in memory.
+- Seeds demo data on first use.
+
+================================================================================
+3. LINE-BY-LINE CODE EXPLANATIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 Employee.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+data class Employee(
+    val id: String,           // Unique ID for the employee
+    val name: String,         // Employee full name
+    val email: String,        // Employee email (used for login)
+    val role: String,         // "employee" or "manager"
+    val shiftStart: String = "09:00",  // Scheduled shift start time
+    val shiftEnd: String = "17:00"     // Scheduled shift end time
+)
+
+- A simple data class to hold employee information.
+- Used throughout the app to identify who is logged in and their schedule.
+
+--------------------------------------------------------------------------------
+3.2 AttendanceRecord.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import java.util.Date
+
+data class AttendanceRecord(
+    val id: String,               // Unique record ID (employeeId + date)
+    val employeeId: String,       // Which employee this record belongs to
+    val employeeName: String,     // Employee name (for display)
+    val date: String,             // Date of the record (yyyy-MM-dd)
+    val clockIn: Date?,           // Clock-in timestamp (null if not clocked in)
+    val clockOut: Date?,          // Clock-out timestamp (null if still working)
+    val hoursWorked: Double = 0.0  // Calculated hours worked
+)
+
+- Stores one clock-in/clock-out session for an employee.
+- clockIn and clockOut are nullable Date objects.
+- hoursWorked is calculated when clocking out.
+
+--------------------------------------------------------------------------------
+3.3 Shift.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+data class Shift(
+    val employeeId: String,   // Which employee this shift belongs to
+    val startTime: String,    // Shift start time (HH:mm)
+    val endTime: String       // Shift end time (HH:mm)
+)
+
+- Stores a manager-assigned shift schedule for an employee.
+- Used when a manager sets custom hours for a staff member.
+
+--------------------------------------------------------------------------------
+3.4 DataManager.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import java.util.Date
+
+class DataManager {
+    companion object {
+        @Volatile
+        private var instance: DataManager? = null
+
+        fun getInstance(): DataManager {
+            return instance ?: synchronized(this) {
+                instance ?: DataManager().also { instance = it }
+            }
+        }
+    }
+
+    // Thread-safe singleton pattern - only one DataManager exists for the whole app.
+    // getInstance() returns the same instance every time.
+
+    private val employees = mutableListOf<Employee>()
+    private val attendance = mutableListOf<AttendanceRecord>()
+    private val shifts = mutableListOf<Shift>()
+
+    // Three in-memory lists that store all app data (reset when app closes).
+
+    fun addEmployee(employee: Employee) {
+        employees.add(employee)
+    }
+
+    fun getEmployees(): List<Employee> {
+        return employees.toList()
+    }
+
+    fun getEmployee(id: String): Employee? {
+        return employees.find { it.id == id }
+    }
+
+    // Add/retrieve employees by ID.
+
+    fun clockIn(employeeId: String, employeeName: String): AttendanceRecord {
+        val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(Date())
+        val recordId = employeeId + "_" + date
+        val existing = attendance.find { it.id == recordId }
+        if (existing != null && existing.clockOut == null) {
+            return existing
+        }
+        val record = AttendanceRecord(
+            id = recordId,
+            employeeId = employeeId,
+            employeeName = employeeName,
+            date = date,
+            clockIn = Date(),
+            clockOut = null,
+            hoursWorked = 0.0
+        )
+        attendance.add(record)
+        return record
+    }
+
+    // Creates a new attendance record with current time as clock-in.
+    // If already clocked in today, returns the existing record.
+
+    fun clockOut(employeeId: String): AttendanceRecord? {
+        val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(Date())
+        val recordId = employeeId + "_" + date
+        val record = attendance.find { it.id == recordId && it.clockOut == null }
+        if (record != null) {
+            val clockOutTime = Date()
+            val clockInTime = record.clockIn ?: Date()
+            val hours = (clockOutTime.time - clockInTime.time) / (1000.0 * 60.0 * 60.0)
+            val updated = record.copy(
+                clockOut = clockOutTime,
+                hoursWorked = hours
+            )
+            val index = attendance.indexOfFirst { it.id == recordId }
+            if (index >= 0) {
+                attendance[index] = updated
+            }
+            return updated
+        }
+        return null
+    }
+
+    // Finds today's open clock-in record, sets clock-out time, calculates hours.
+    // Returns null if employee is not currently clocked in.
+
+    fun getAttendance(employeeId: String): List<AttendanceRecord> {
+        return attendance.filter { it.employeeId == employeeId }
+    }
+
+    fun getAllAttendance(): List<AttendanceRecord> {
+        return attendance.toList()
+    }
+
+    fun getTodayAttendance(): List<AttendanceRecord> {
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(Date())
+        return attendance.filter { it.date == today }
+    }
+
+    // Returns attendance for a specific employee, all records, or today's records.
+
+    fun isClockedIn(employeeId: String): Boolean {
+        val date = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(Date())
+        val recordId = employeeId + "_" + date
+        return attendance.any { it.id == recordId && it.clockOut == null }
+    }
+
+    // Returns true if the employee has a clock-in with no clock-out today.
+
+    fun addShift(shift: Shift) {
+        shifts.add(shift)
+    }
+
+    fun getShifts(): List<Shift> {
+        return shifts.toList()
+    }
+
+    fun getShiftForEmployee(employeeId: String): Shift? {
+        return shifts.find { it.employeeId == employeeId }
+    }
+
+    // Manager-assigned shifts: add, list all, or get one employee's shift.
+
+    fun getPresentCount(): Int {
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(Date())
+        val clockedIn = attendance.filter { it.date == today && it.clockOut == null }.map { it.employeeId }.toSet()
+        return employees.count { clockedIn.contains(it.id) }
+    }
+
+    fun getAbsentCount(): Int {
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(Date())
+        val clockedIn = attendance.filter { it.date == today && it.clockOut == null }.map { it.employeeId }.toSet()
+        return employees.count { !clockedIn.contains(it.id) && it.role == "employee" }
+    }
+
+    // Counts employees clocked in today (present) vs not clocked in (absent).
+
+    fun seedDemoData() {
+        if (employees.isEmpty()) {
+            addEmployee(Employee("1", "John Doe", "john@company.com", "employee", "09:00", "17:00"))
+            addEmployee(Employee("2", "Jane Smith", "jane@company.com", "employee", "09:00", "17:00"))
+            addEmployee(Employee("3", "Mike Wilson", "mike@company.com", "manager", "09:00", "17:00"))
+            addEmployee(Employee("4", "Sarah Brown", "sarah@company.com", "employee", "08:30", "16:30"))
+            addShift(Shift("1", "09:00", "17:00"))
+            addShift(Shift("2", "09:00", "17:00"))
+            addShift(Shift("4", "08:30", "16:30"))
+        }
+    }
+
+    // Populates the app with 4 demo employees and 3 shifts on first launch.
+    // Mike Wilson (id "3") is the manager.
+}
+
+--------------------------------------------------------------------------------
+3.5 SplashActivity.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import android.content.Intent
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import androidx.appcompat.app.AppCompatActivity
+
+class SplashActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_splash)
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            val intent = Intent(this, LoginActivity::class.java)
+            startActivity(intent)
+            finish()
+        }, 1500)
+    }
+}
+
+- Shows splash screen for 1500ms (1.5 seconds).
+- Then starts LoginActivity and closes (finishes) itself so user can't go back to splash.
+
+--------------------------------------------------------------------------------
+3.6 LoginActivity.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import android.content.Intent
+import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+
+class LoginActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_login)
+
+        val emailEditText = findViewById<EditText>(R.id.emailEditText)
+        val passwordEditText = findViewById<EditText>(R.id.passwordEditText)
+        val loginButton = findViewById<Button>(R.id.loginButton)
+        val registerText = findViewById<TextView>(R.id.registerText)
+        val forgotPasswordText = findViewById<TextView>(R.id.forgotPasswordText)
+
+        loginButton.setOnClickListener {
+            val email = emailEditText.text.toString().trim()
+            val password = passwordEditText.text.toString().trim()
+
+            if (email.isEmpty() || password.isEmpty()) {
+                Toast.makeText(this, "Please fill in all fields", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            DataManager.getInstance().seedDemoData()
+
+            val employee = DataManager.getInstance().getEmployees().firstOrNull { it.email == email }
+            if (employee != null) {
+                val targetActivity = if (employee.role == "manager") ManagerActivity::class.java else MainActivity::class.java
+                val intent = Intent(this, targetActivity)
+                intent.putExtra("employeeId", employee.id)
+                intent.putExtra("employeeName", employee.name)
+                intent.putExtra("role", employee.role)
+                startActivity(intent)
+                finish()
+            } else {
+                Toast.makeText(this, "Invalid email or password", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        registerText.setOnClickListener {
+            val intent = Intent(this, RegisterActivity::class.java)
+            startActivity(intent)
+        }
+
+        forgotPasswordText.setOnClickListener {
+            val intent = Intent(this, ForgotPasswordActivity::class.java)
+            startActivity(intent)
+        }
+    }
+}
+
+- Gets references to email, password, login button, and two text links.
+- On login click: validates fields are not empty, seeds demo data, finds employee by email.
+- If found: passes employeeId, employeeName, role to the correct activity (Manager or Main).
+- If not found: shows "Invalid email or password" toast.
+- Register and ForgotPassword links start their respective activities.
+
+--------------------------------------------------------------------------------
+3.7 RegisterActivity.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import android.content.Intent
+import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+
+class RegisterActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_register)
+
+        val nameEditText = findViewById<EditText>(R.id.nameEditText)
+        val emailEditText = findViewById<EditText>(R.id.emailEditText)
+        val passwordEditText = findViewById<EditText>(R.id.passwordEditText)
+        val confirmPasswordEditText = findViewById<EditText>(R.id.confirmPasswordEditText)
+        val registerButton = findViewById<Button>(R.id.registerButton)
+        val loginText = findViewById<TextView>(R.id.loginText)
+
+        registerButton.setOnClickListener {
+            val name = nameEditText.text.toString().trim()
+            val email = emailEditText.text.toString().trim()
+            val password = passwordEditText.text.toString().trim()
+            val confirmPassword = confirmPasswordEditText.text.toString().trim()
+
+            if (name.isEmpty() || email.isEmpty() || password.isEmpty() || confirmPassword.isEmpty()) {
+                Toast.makeText(this, "Please fill in all fields", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            if (password != confirmPassword) {
+                Toast.makeText(this, "Passwords do not match", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            val id = (DataManager.getInstance().getEmployees().size + 1).toString()
+            DataManager.getInstance().addEmployee(Employee(id, name, email, "employee"))
+
+            Toast.makeText(this, "Registration successful", Toast.LENGTH_SHORT).show()
+            val intent = Intent(this, LoginActivity::class.java)
+            startActivity(intent)
+            finish()
+        }
+
+        loginText.setOnClickListener {
+            finish()
+        }
+    }
+}
+
+- Validates all fields are filled and passwords match.
+- Creates a new Employee with role "employee" and an auto-generated ID.
+- Saves to DataManager, shows success toast, returns to Login screen.
+
+--------------------------------------------------------------------------------
+3.8 ForgotPasswordActivity.kt
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+
+class ForgotPasswordActivity : AppCompatActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_forgot_password)
+
+        val emailEditText = findViewById<EditText>(R.id.emailEditText)
+        val resetButton = findViewById<Button>(R.id.resetButton)
+
+        resetButton.setOnClickListener {
+            val email = emailEditText.text.toString().trim()
+
+            if (email.isEmpty()) {
+                Toast.makeText(this, "Please enter your email", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Password reset link sent to $email", Toast.LENGTH_SHORT).show()
+                finish()
+            }
+        }
+    }
+}
+
+- Placeholder password reset: shows a toast saying reset link was sent.
+- No actual email sending - just a UI placeholder for beginners.
+
+--------------------------------------------------------------------------------
+3.9 MainActivity.kt (Employee Dashboard)
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import android.app.AlertDialog
+import android.os.Bundle
+import android.widget.Button
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var employeeId: String
+    private lateinit var employeeName: String
+    private lateinit var role: String
+
+    private lateinit var clockInButton: Button
+    private lateinit var clockOutButton: Button
+    private lateinit var statusText: TextView
+    private lateinit var hoursText: TextView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        employeeId = intent.getStringExtra("employeeId") ?: ""
+        employeeName = intent.getStringExtra("employeeName") ?: "Employee"
+        role = intent.getStringExtra("role") ?: "employee"
+
+        setTitle("Employee Time Clock")
+
+        statusText = findViewById(R.id.statusText)
+        hoursText = findViewById(R.id.hoursText)
+        clockInButton = findViewById(R.id.clockInButton)
+        clockOutButton = findViewById(R.id.clockOutButton)
+
+        val employee = DataManager.getInstance().getEmployee(employeeId)
+        if (employee != null) {
+            statusText.text = "Welcome, ${employee.name}"
+        }
+
+        updateUI()
+
+        clockInButton.setOnClickListener {
+            val record = DataManager.getInstance().clockIn(employeeId, employeeName)
+            updateUI()
+            Toast.makeText(this, "Clocked in at ${formatTime(record.clockIn)}", Toast.LENGTH_SHORT).show()
+        }
+
+        clockOutButton.setOnClickListener {
+            val record = DataManager.getInstance().clockOut(employeeId)
+            if (record != null) {
+                updateUI()
+                Toast.makeText(this, "Clocked out at ${formatTime(record.clockOut)}", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "You are not clocked in", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun updateUI() {
+        val isClockedIn = DataManager.getInstance().isClockedIn(employeeId)
+        clockInButton.isEnabled = !isClockedIn
+        clockOutButton.isEnabled = isClockedIn
+
+        if (isClockedIn) {
+            statusText.text = "$employeeName is currently clocked in"
+        } else {
+            statusText.text = "$employeeName is not clocked in"
+        }
+
+        val todayRecords = DataManager.getInstance().getAttendance(employeeId)
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+        val todayRecord = todayRecords.find { it.date == today && it.clockIn != null }
+        val hours = if (todayRecord != null) todayRecord.hoursWorked else 0.0
+        hoursText.text = "Hours worked today: ${String.format("%.2f", hours)} hours"
+    }
+
+    private fun formatTime(date: Date?): String {
+        if (date == null) return "--:--"
+        return SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateUI()
+    }
+}
+
+- Receives employeeId, name, role from login intent.
+- Shows welcome message, CLOCK IN / CLOCK OUT buttons, hours worked today.
+- Clock In: calls DataManager.clockIn(), updates UI, shows time toast.
+- Clock Out: calls DataManager.clockOut(), updates UI, shows time toast or error if not clocked in.
+- updateUI() enables/disables buttons based on clock-in status and refreshes hours.
+- onResume() calls updateUI() so data refreshes when returning to this screen.
+
+--------------------------------------------------------------------------------
+3.10 ManagerActivity.kt (Manager Dashboard)
+--------------------------------------------------------------------------------
+package com.example.employeetimeclock
+
+import android.app.AlertDialog
+import android.os.Bundle
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.ListView
+import android.widget.Spinner
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class ManagerActivity : AppCompatActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_manager)
+
+        setTitle("Manager Dashboard")
+
+        val employeeListView = findViewById(R.id.employeeListView) as ListView
+        val reportListView = findViewById(R.id.reportListView) as ListView
+        val periodSpinner = findViewById(R.id.periodSpinner) as Spinner
+        val presentText = findViewById(R.id.presentText) as TextView
+        val absentText = findViewById(R.id.absentText) as TextView
+        val refreshButton = findViewById(R.id.refreshButton) as Button
+
+        val adapter = ArrayAdapter<String>(this, android.R.layout.simple_list_item_1)
+        employeeListView.adapter = adapter
+
+        val reportAdapter = ArrayAdapter<String>(this, android.R.layout.simple_list_item_1)
+        reportListView.adapter = reportAdapter
+
+        val periods = arrayOf("Today", "This Month")
+        val periodAdapter = ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, periods)
+        periodAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        periodSpinner.adapter = periodAdapter
+
+        refreshDashboard(adapter, reportAdapter, presentText, absentText, periodSpinner)
+
+        refreshButton.setOnClickListener {
+            refreshDashboard(adapter, reportAdapter, presentText, absentText, periodSpinner)
+        }
+
+        periodSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                refreshDashboard(adapter, reportAdapter, presentText, absentText, periodSpinner)
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
+        employeeListView.onItemClickListener = android.widget.AdapterView.OnItemClickListener { _, _, position, _ ->
+            val employee = DataManager.getInstance().getEmployees()[position]
+            showShiftDialog(employee)
+        }
+    }
+
+    private fun refreshDashboard(
+        employeeAdapter: ArrayAdapter<String>,
+        reportAdapter: ArrayAdapter<String>,
+        presentText: TextView,
+        absentText: TextView,
+        periodSpinner: Spinner
+    ) {
+        val employees = DataManager.getInstance().getEmployees()
+        val employeeNames = employees.map { "${it.name} (${it.role})" }
+        employeeAdapter.clear()
+        employeeAdapter.addAll(employeeNames)
+        employeeAdapter.notifyDataSetChanged()
+
+        val presentCount = DataManager.getInstance().getPresentCount()
+        val absentCount = DataManager.getInstance().getAbsentCount()
+        presentText.text = "Present: $presentCount"
+        absentText.text = "Absent: $absentCount"
+
+        val selectedPeriod = periodSpinner.selectedItem.toString()
+        val records = when (selectedPeriod) {
+            "Today" -> DataManager.getInstance().getTodayAttendance()
+            else -> DataManager.getInstance().getAllAttendance()
+        }
+
+        val reportLines = records.map { record ->
+            val hours = if (record.clockOut != null) String.format("%.2f", record.hoursWorked) else "N/A"
+            "${record.employeeName} - ${record.date} - In: ${formatTime(record.clockIn)} - Out: ${formatTime(record.clockOut)} - Hours: $hours"
+        }
+        reportAdapter.clear()
+        reportAdapter.addAll(reportLines)
+        reportAdapter.notifyDataSetChanged()
+    }
+
+    private fun showShiftDialog(employee: Employee) {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_shift, null)
+        val startEdit = dialogView.findViewById(R.id.shiftStartEdit) as android.widget.EditText
+        val endEdit = dialogView.findViewById(R.id.shiftEndEdit) as android.widget.EditText
+        val saveButton = dialogView.findViewById(R.id.shiftSaveButton) as Button
+
+        val existingShift = DataManager.getInstance().getShiftForEmployee(employee.id)
+        startEdit.setText(existingShift?.startTime ?: employee.shiftStart)
+        endEdit.setText(existingShift?.endTime ?: employee.shiftEnd)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Set Shift for ${employee.name}")
+            .setView(dialogView)
+            .setPositiveButton("Save") { _, _ ->
+                val start = startEdit.text.toString().trim()
+                val end = endEdit.text.toString().trim()
+                if (start.isNotEmpty() && end.isNotEmpty()) {
+                    DataManager.getInstance().addShift(Shift(employee.id, start, end))
+                    Toast.makeText(this, "Shift saved for ${employee.name}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel") { _, _ -> }
+            .create()
+        dialog.show()
+    }
+
+    private fun formatTime(date: Date?): String {
+        if (date == null) return "--:--"
+        return SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+    }
+}
+
+- Shows Present/Absent counts for today.
+- Two ListViews: employees (tap to set shift) and attendance reports.
+- Spinner to filter reports by "Today" or "This Month".
+- refreshDashboard() populates both lists and updates present/absent counts.
+- Tap an employee -> opens AlertDialog with Shift Start/End fields -> saves shift to DataManager.
+
+================================================================================
+4. HOW TO RUN THE APP
+================================================================================
+
+Option A - Android Studio:
+1. Open the project folder in Android Studio.
+2. Wait for Gradle sync to complete.
+3. Select "Pixel 4 API 37.0" from the device dropdown.
+4. Click the green Run ▶ button.
+5. The app installs and launches on the emulator.
+
+Option B - Command Line:
+1. ./gradlew assembleDebug
+2. adb install -r app/build/outputs/apk/debug/app-debug.apk
+3. adb shell am start -n "com.example.employeetimeclock/com.example.employeetimeclock.SplashActivity"
+
+================================================================================
+5. DEMO CREDENTIALS
+================================================================================
+
+No real passwords - any non-empty password works.
+
+Email                  Role
+john@company.com       Employee
+jane@company.com       Employee
+mike@company.com       Manager
+sarah@company.com      Employee
+
+================================================================================
+6. LIMITATIONS (BEGINNER VERSION)
+================================================================================
+
+- Data is stored in memory only (resets when app is closed/restarted).
+- No Firebase, no database, no internet backend.
+- No real password authentication (any password works with valid email).
+- No persistent storage (SharedPreferences/SQLite not implemented).
+- No image/icon resources (mipmap removed for simplicity).
+- Manager shift changes are in-memory only.
+
+================================================================================
+END OF PROJECT NOTES
+================================================================================
